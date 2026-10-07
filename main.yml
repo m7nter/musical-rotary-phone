@@ -1,0 +1,84 @@
+name: Build SecureVault IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build:
+    name: Build IPA (no signing)
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26.6
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Restore source tree from full archive when needed
+        run: |
+          if [ ! -d Sources/SecureVault ] || [ ! -d Tests/SecureVaultTests ]; then
+            archive="LoveUpdate-2026-10-07-camera-editor-pin-full-source.zip"
+            if [ ! -f "$archive" ]; then
+              echo "::error::Missing Sources/SecureVault and Tests/SecureVaultTests. Upload the complete source tree or $archive to the repository root."
+              exit 1
+            fi
+            unzip -oq "$archive" -d .
+          fi
+          test -f Sources/SecureVault/App/SecureVaultApp.swift
+          test -f Tests/SecureVaultTests/StorageAndEditingTests.swift
+
+      - name: Validate App Icon
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          path = Path('Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png')
+          image = path.read_bytes()
+          if image[:8] != b'\x89PNG\r\n\x1a\n' or struct.unpack('>II', image[16:24]) != (1024, 1024):
+              raise SystemExit('AppIcon.png must be a valid 1024x1024 PNG from the full source archive')
+          print('AppIcon.png: PNG signature and 1024x1024 dimensions verified')
+          PY
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build app
+        run: |
+          xcodebuild \
+            -project SecureVault.xcodeproj \
+            -scheme SecureVault \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build" \
+            build
+
+      - name: Package into IPA
+        run: |
+          APP_PATH=$(find "$GITHUB_WORKSPACE/build" \
+            -path "*/Release-iphoneos/*.app" -type d | head -1)
+          echo "Found app at: $APP_PATH"
+          mkdir -p "$GITHUB_WORKSPACE/ipa_output/Payload"
+          cp -r "$APP_PATH" "$GITHUB_WORKSPACE/ipa_output/Payload/"
+          cd "$GITHUB_WORKSPACE/ipa_output"
+          zip -r "../SecureVault.ipa" Payload/
+          ls -lh "$GITHUB_WORKSPACE/SecureVault.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SecureVault-IPA
+          path: SecureVault.ipa
+          retention-days: 30
